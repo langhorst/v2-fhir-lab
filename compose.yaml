@@ -1,0 +1,64 @@
+# v2-to-FHIR lab: base stack.
+#
+#   hospital --MLLP--> gateway --MLLP x4 feeds--> engine --REST--> fhir
+#
+# This file defines the parts that never change: the message source, the
+# feed gateway, and the networks. The engine and the FHIR server live in
+# stack/*.yaml and are chosen by COMPOSE_FILE in .env, so swapping Mirth/OIE
+# for Waggle, or HAPI for Nectar, is a one-line change there.
+
+name: v2fhirlab
+
+services:
+
+  # Google Simulated Hospital: one hospital, every message type, one connection.
+  hospital:
+    build: ./hospital
+    image: v2fhirlab/hospital:local
+    command:
+      - -output=mllp
+      - -mllp_destination=gateway:2575
+      - -mllp_keep_alive=true
+      - -hl7_timezone=${HOSPITAL_TIMEZONE}
+      - -pathways_per_hour=${HOSPITAL_PATHWAYS_PER_HOUR}
+      - -pathway_manager_type=${HOSPITAL_PATHWAY_MANAGER}
+      - -pathway_names=${HOSPITAL_PATHWAYS}
+      - -header_config_file=configs/lab/header.yml
+    volumes:
+      - ./hospital/config/header.yml:/health/configs/lab/header.yml:ro
+      - ./hospital/pathways/lab_pathways.yml:/health/configs/pathways/lab_pathways.yml:ro
+    ports:
+      - "127.0.0.1:8000:8000"   # dashboard: http://localhost:8000/simulated-hospital/
+    networks: [hospital]
+    depends_on:
+      gateway:
+        condition: service_healthy   # Simulated Hospital exits if it can't connect at startup
+    restart: unless-stopped
+
+  # Splits the combined stream into per-feed interfaces and archives every message.
+  gateway:
+    build: ./gateway
+    image: v2fhirlab/gateway:local
+    environment:
+      ROUTES: ${GATEWAY_ROUTES}
+      ARCHIVE_DIR: /archive
+    volumes:
+      - ./data/archive:/archive
+    ports:
+      - "127.0.0.1:8081:8081"   # http://localhost:8081/stats
+    networks: [hospital, integration]
+    healthcheck:
+      test: ["CMD", "/gateway", "-healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+# Three tiers, like subnets. The hospital can only reach the gateway; each
+# database is reachable only by its own service. These map directly onto
+# subnets and security groups when this moves to AWS.
+networks:
+  hospital:
+  integration:
+  engine-data:
+  fhir-data:

@@ -1,0 +1,47 @@
+# Engine: Open Integration Engine (community fork of Mirth Connect 4.5.2).
+# Any engine that listens on the four feed ports can replace this file.
+# Note: in a multi-file compose project, relative paths resolve from the
+# FIRST file (compose.yaml), i.e. the project root.
+
+services:
+  engine:
+    image: ${OIE_IMAGE}
+    environment:
+      DATABASE: postgres
+      DATABASE_URL: jdbc:postgresql://engine-db:5432/engine
+      DATABASE_USERNAME: engine
+      DATABASE_PASSWORD: ${ENGINE_DB_PASSWORD}
+      KEYSTORE_STOREPASS: ${ENGINE_KEYSTORE_PASSWORD}
+      KEYSTORE_KEYPASS: ${ENGINE_KEYSTORE_PASSWORD}
+      VMOPTIONS: -Xmx${ENGINE_HEAP}
+      SERVER_ID: ${ENGINE_SERVER_ID}
+    volumes:
+      - engine-appdata:/opt/engine/appdata
+    ports:
+      - "127.0.0.1:8443:8443"            # Administrator
+      - "127.0.0.1:6661-6664:6661-6664"  # feeds, exposed so you can also send from local tools
+    networks: [integration, engine-data]
+    depends_on:
+      engine-db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  engine-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: engine
+      POSTGRES_USER: engine
+      POSTGRES_PASSWORD: ${ENGINE_DB_PASSWORD}
+    volumes:
+      - engine-db:/var/lib/postgresql/data
+    networks: [engine-data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U engine -d engine"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  engine-appdata:
+  engine-db:

@@ -1,0 +1,14 @@
+# MSH-3..6 for generated messages. Simulated Hospital only supports a
+# per-type override for ORU, so ADT, ORM and MDM share the default.
+# Distinct sending applications make each feed look like a separate source
+# system, which is what your engine's routing and your FHIR Provenance will see.
+default:
+  sending_application: "SIMHOSP_EHR"
+  sending_facility: "SIMHOSP"
+  receiving_application: "INTEGRATION"
+  receiving_facility: "LAB"
+oru:
+  sending_application: "SIMHOSP_LIS"
+  sending_facility: "SIMHOSP"
+  receiving_application: "INTEGRATION"
+  receiving_facility: "LAB"

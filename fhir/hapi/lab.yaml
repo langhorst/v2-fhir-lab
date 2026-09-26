@@ -1,0 +1,19 @@
+# Overrides layered on top of the HAPI JPA starter's built-in application.yaml.
+spring:
+  datasource:
+    url: jdbc:postgresql://fhir-db:5432/hapi
+    username: hapi
+    password: ${FHIR_DB_PASSWORD}
+    driverClassName: org.postgresql.Driver
+  jpa:
+    properties:
+      hibernate.dialect: ca.uhn.fhir.jpa.model.dialect.HapiFhirPostgresDialect
+
+hapi:
+  fhir:
+    fhir_version: R4
+    # Lab conveniences: see new data immediately, and allow wiping it.
+    reuse_cached_search_results_millis: 0
+    allow_multiple_delete: true
+    delete_expunge_enabled: true
+    expunge_enabled: true

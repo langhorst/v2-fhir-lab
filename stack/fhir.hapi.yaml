@@ -1,0 +1,38 @@
+# FHIR server: HAPI FHIR JPA server, R4, backed by Postgres.
+# Any server exposing the FHIR REST API at http://fhir:8080/fhir can replace this file.
+
+services:
+  fhir:
+    image: ${HAPI_IMAGE}
+    environment:
+      # Layer our settings on top of HAPI's defaults rather than replacing them.
+      SPRING_CONFIG_ADDITIONAL_LOCATION: file:/config/lab.yaml
+      FHIR_DB_PASSWORD: ${FHIR_DB_PASSWORD}
+    volumes:
+      - ./fhir/hapi/lab.yaml:/config/lab.yaml:ro
+    ports:
+      - "127.0.0.1:8080:8080"   # http://localhost:8080/fhir  (web tester at http://localhost:8080/)
+    networks: [integration, fhir-data]
+    depends_on:
+      fhir-db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  fhir-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: hapi
+      POSTGRES_USER: hapi
+      POSTGRES_PASSWORD: ${FHIR_DB_PASSWORD}
+    volumes:
+      - fhir-db:/var/lib/postgresql/data
+    networks: [fhir-data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hapi -d hapi"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  fhir-db:

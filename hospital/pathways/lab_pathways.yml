@@ -1,0 +1,63 @@
+# Short, scripted pathways for development. Delays are seconds, not hours,
+# so a full encounter plays out while you watch.
+#
+# percentage_of_patients: 0 keeps them out of random (distribution) mode.
+# Run them with HOSPITAL_PATHWAY_MANAGER=deterministic and list them in
+# HOSPITAL_PATHWAYS (see .env). Deterministic mode cycles through the list.
+
+lab_admit_discharge:            # ADT^A01, ADT^A03
+  percentage_of_patients: 0
+  pathway:
+    - admission:
+        loc: Non-renal
+    - delay:
+        from: 10s
+        to: 10s
+    - discharge: {}
+
+lab_admit_transfer_discharge:   # ADT^A01, ADT^A02, ADT^A03
+  percentage_of_patients: 0
+  pathway:
+    - admission:
+        loc: Non-renal
+    - delay:
+        from: 10s
+        to: 10s
+    - transfer:
+        loc: Renal
+    - delay:
+        from: 10s
+        to: 10s
+    - discharge: {}
+
+lab_admit_cbc_discharge:        # ADT^A01, ORM^O01, ORU^R01 (x2), ADT^A03
+  percentage_of_patients: 0
+  pathway:
+    - admission:
+        loc: Non-renal
+    - delay:
+        from: 5s
+        to: 5s
+    - order:
+        order_profile: COMPLETE BLOOD COUNT
+        order_id: cbc
+    - delay:
+        from: 15s
+        to: 15s
+    - result:
+        order_profile: COMPLETE BLOOD COUNT
+        order_id: cbc
+        order_status: A
+        results_status: P
+    - delay:
+        from: 15s
+        to: 15s
+    - result:
+        order_profile: COMPLETE BLOOD COUNT
+        order_id: cbc
+        order_status: CM
+        results_status: F
+    - delay:
+        from: 10s
+        to: 10s
+    - discharge: {}
