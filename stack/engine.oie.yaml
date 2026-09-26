@@ -5,7 +5,9 @@
 
 services:
   engine:
-    image: ${OIE_IMAGE}
+    # OIE 4.6.0 plus the Web Support extension (browser admin at /oie-webadmin/).
+    build: ./engine/oie
+    image: v2fhirlab/engine:local
     environment:
       DATABASE: postgres
       DATABASE_URL: jdbc:postgresql://engine-db:5432/engine

@@ -38,10 +38,11 @@ Then check each piece:
 - Simulated Hospital dashboard: http://localhost:8000/simulated-hospital/
 - HAPI: http://localhost:8080/fhir/metadata (give it a minute or two to start; watch `docker compose logs -f fhir`)
 - Archive: `ls data/archive/*`
+- OIE web administrator: https://localhost:8443/oie-webadmin/ (give the engine a minute to start)
 
 ### Engine setup (one time)
 
-1. Open the OIE Administrator (get the launcher from openintegrationengine.org) and connect to `https://localhost:8443`. The default login is admin / admin; change it.
+1. Open the web administrator at https://localhost:8443/oie-webadmin/ (accept the self-signed certificate). The default login is admin / admin; the first login asks you to set a new password. The desktop Administrator launcher from openintegrationengine.org still works too, pointed at `https://localhost:8443`.
 2. Create four channels, each with a **TCP Listener** source in MLLP mode on ports 6661 (ADT), 6662 (ORM), 6663 (ORU) and 6664 (MDM). The data type is HL7 v2.x. For now, leave the destinations empty or send to a Channel Writer; the point is just to accept and ACK.
 3. Deploy them and watch the gateway's `delivered` counters climb.
 
@@ -72,11 +73,13 @@ docker compose down -v                       # stop everything and delete ALL vo
 
 **Archive permissions on Linux and Raspberry Pi.** The gateway runs as a non-root user (uid 65532). Docker Desktop on a Mac handles this for you. On Linux, run `sudo chown 65532 data/archive` once.
 
-**Pin your images.** `.env` uses `:latest` for OIE and HAPI to get you started. Once things work, pin them to exact versions so the lab doesn't change underneath you.
+**OIE image.** The newest published OIE image is 4.5.2, but the [Web Support](https://github.com/gibson9583/oie-web-support-plugin) extension that provides the browser-based administrator needs 4.6.0. So `engine/oie/Dockerfile` builds the engine from the OIE 4.6.0 release tarball, the same way upstream's image is built, and bakes Web Support into `extensions/`. Both downloads are pinned by URL and SHA-256; to upgrade either, change both values together and run `docker compose build engine`. Moving an existing `engine-db` volume to a newer OIE upgrades its schema, and there's no going back.
+
+**Pin your images.** `.env` uses `:latest` for HAPI to get you started. Once things work, pin them to exact versions so the lab doesn't change underneath you.
 
 ## Docker concepts in this repo
 
-- **Multi-stage builds** (`gateway/Dockerfile`, `hospital/Dockerfile`): compile in a full Go image, ship only the binary on distroless. The gateway image is a few MB.
+- **Multi-stage builds** (`gateway/Dockerfile`, `hospital/Dockerfile`): compile in a full Go image, ship only the binary on distroless. The gateway image is a few MB. `engine/oie/Dockerfile` uses a throwaway stage to download, verify (`ADD --checksum`) and unpack, so the final image only carries the result.
 - **Cross-compilation**: `--platform=$BUILDPLATFORM` plus `TARGETARCH` builds arm64 images natively, without emulation.
 - **Healthchecks and startup order**: `depends_on: condition: service_healthy`. Simulated Hospital exits if it can't connect at startup, so it waits for the gateway to report healthy. The gateway has no shell or curl, so it health-checks itself with `/gateway -healthcheck`.
 - **Networks as security boundaries**: four networks. The hospital can only reach the gateway, and each database is only reachable by its own service.
@@ -90,7 +93,7 @@ Anything that listens on the four feed ports can be the engine. Anything that se
 
 ## Raspberry Pi
 
-Every image here is available for arm64: the gateway and hospital cross-compile, OIE and Postgres publish arm64 images, and HAPI does too (confirm with `docker manifest inspect hapiproject/hapi:latest`). A single Pi 5 with 8 GB can run the whole stack; the two JVMs are the heavy part.
+Every image here is available for arm64: the gateway and hospital cross-compile, OIE is built from a Java tarball on the multi-arch Temurin image, Postgres publishes arm64 images, and HAPI does too (confirm with `docker manifest inspect hapiproject/hapi:latest`). A single Pi 5 with 8 GB can run the whole stack; the two JVMs are the heavy part.
 
 To spread the stack across several Pis, the service and network layout carries over to Docker Swarm or k3s. Build the images with `docker buildx build --platform linux/arm64,linux/amd64` and push them to a registry the Pis can pull from.
 
