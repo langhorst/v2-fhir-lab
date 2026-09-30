@@ -43,10 +43,57 @@ Then check each piece:
 ### Engine setup (one time)
 
 1. Open the web administrator at https://localhost:8443/oie-webadmin/ (accept the self-signed certificate). The default login is admin / admin; the first login asks you to set a new password. The desktop Administrator launcher from openintegrationengine.org still works too, pointed at `https://localhost:8443`.
-2. Create four channels, each with a **TCP Listener** source in MLLP mode on ports 6661 (ADT), 6662 (ORM), 6663 (ORU) and 6664 (MDM). The data type is HL7 v2.x. For now, leave the destinations empty or send to a Channel Writer; the point is just to accept and ACK.
-3. Deploy them and watch the gateway's `delivered` counters climb.
+2. Import and deploy the ADT channel: `OIE_PASSWORD=<your new password> engine/oie/channels/import.sh`. Or, in the web administrator, use **Channels → Import** on `engine/oie/channels/adt-to-fhir.xml`, then deploy it.
+3. The ORM, ORU and MDM feeds don't have channels yet. Until they do, the gateway keeps those messages queued (nothing is lost). To just accept and ACK them for now, create a channel for each with a **TCP Listener** source in MLLP mode on 6662 (ORM), 6663 (ORU) or 6664 (MDM), data type HL7 v2.x, and deploy it.
+4. Watch the gateway's `delivered` counters climb, and new Patients and Encounters appear at http://localhost:8080/fhir/Patient.
 
-The ADT channel's transformer is where the actual v2-to-FHIR work starts.
+## ADT to FHIR
+
+The **ADT to FHIR** channel (`engine/oie/channels/adt-to-fhir.xml`) listens on 6661 and turns each **ADT^A01** (admit) into a FHIR transaction Bundle that it posts to `http://fhir:8080/fhir`:
+
+| v2 | FHIR | Notes |
+|---|---|---|
+| PID-3 (all repetitions) | `Patient.identifier` | CX.4 (assigning authority) picks the `system`; CX.5 becomes the type (`MRN` → v2-0203 `MR`) |
+| PID-5 | `Patient.name` | family, given (XPN.2 and .3), prefix, suffix |
+| PID-7 | `Patient.birthDate` | date only |
+| PID-8 | `Patient.gender` | v2 table 0001 → AdministrativeGender |
+| PID-11 | `Patient.address` | |
+| PID-13 | `Patient.telecom` | |
+| PV1-19 | `Encounter.identifier` | type `VN` |
+| (event A01) | `Encounter.status` = `in-progress` | |
+| PV1-2 | `Encounter.class` | I → IMP, O → AMB, E → EMER, P → PRENC |
+| PV1-3 | `Encounter.location` | ward, room, bed as a display name for now |
+| PV1-7 | `Encounter.participant` (ATND) | by identifier and display name for now |
+| PV1-10 | `Encounter.serviceType` | v2 table 0069 (MED, SUR, CAR, ...) |
+| PV1-44 | `Encounter.period.start` | |
+
+How it behaves:
+
+- **Replays don't duplicate.** Both resources are written with conditional updates (`PUT Patient?identifier=<MRN>`, `PUT Encounter?identifier=<visit number>`), so re-sending a message updates what's there. The Encounter points at the Patient through the bundle, so HAPI links them in one transaction.
+- **Time zones.** v2 timestamps carry no offset, but FHIR needs one on any dateTime with a time. The engine gets `SOURCE_TIMEZONE` from `HOSPITAL_TIMEZONE` in `.env`, and the channel reads timestamps in that zone.
+- **ACKs mean something.** The channel ACKs only after HAPI answers: AA when the bundle was stored, AE when anything failed (a mapping error or a FHIR error). The gateway counts AE as `rejected`, and the message and the error are in the channel's message browser. Other ADT events are ACKed AA with "not converted to FHIR yet".
+- **Simulated Hospital quirks.** It writes some table values as words (`MRN` for `MR`, `HOME` for `H`/`PRN`, `CURRENT` as a name type). The channel maps the first two and leaves name type out; the code maps are at the top of the transformer script.
+- **Identifier systems** are configured at the top of the transformer script. `simhospital.example.org` stands in for the hospital's own namespace; NHS numbers use the real NHS system.
+
+Not converted yet: other ADT events (A02 transfer and A03 discharge are next), Location and Practitioner resources, PD1, AL1 allergies, PID-22 ethnic group, and a Provenance record linking each resource back to its v2 message.
+
+### Working on the channel
+
+Edit the transformer in the web administrator (**Channels → ADT to FHIR → FHIR transaction → Transformer**), deploy, and test. When you're happy, write the channel back into the repo and commit it:
+
+```sh
+engine/oie/channels/export.sh                # engine -> engine/oie/channels/*.xml
+engine/oie/channels/import.sh                # engine/oie/channels/*.xml -> engine, and deploy
+```
+
+To test without waiting for Simulated Hospital, send the sample messages straight to the engine port (Python 3, no dependencies):
+
+```sh
+tools/mllp_send.py localhost 6661 samples/adt/a01_admit.hl7
+curl 'http://localhost:8080/fhir/Patient?identifier=http://simhospital.example.org/fhir/sid/mrn|2590157853&_revinclude=Encounter:subject'
+```
+
+These bypass the gateway, so they don't land in `data/archive/`.
 
 ## Everyday commands
 

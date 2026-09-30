@@ -17,6 +17,8 @@ services:
       KEYSTORE_KEYPASS: ${ENGINE_KEYSTORE_PASSWORD}
       VMOPTIONS: -Xmx${ENGINE_HEAP}
       SERVER_ID: ${ENGINE_SERVER_ID}
+      # v2 timestamps carry no offset; channels read this to interpret them.
+      SOURCE_TIMEZONE: ${HOSPITAL_TIMEZONE}
     volumes:
       - engine-appdata:/opt/engine/appdata
     ports:
