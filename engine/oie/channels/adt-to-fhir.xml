@@ -3,7 +3,7 @@
   <nextMetaDataId>2</nextMetaDataId>
   <name>ADT to FHIR</name>
   <description>ADT feed (port 6661). ADT^A01 becomes a FHIR transaction Bundle (Patient + Encounter) posted to http://fhir:8080/fhir. Other ADT events are filtered for now.</description>
-  <revision>1</revision>
+  <revision>2</revision>
   <sourceConnector version="4.6.0">
     <metaDataId>0</metaDataId>
     <name>sourceConnector</name>
@@ -199,13 +199,20 @@
             <name>ADT^A01 to Patient + Encounter bundle</name>
             <sequenceNumber>0</sequenceNumber>
             <enabled>true</enabled>
-            <script>// ADT^A01 (admit) -&gt; FHIR R4 transaction Bundle: one Patient (from PID) and
-// one Encounter (from PV1), each written with a conditional update keyed on
-// its business identifier, so replaying a message updates instead of
-// duplicating.
+            <script>// ADT^A01 (admit) -&gt; FHIR R4 transaction Bundle.
 //
-// Mappings follow the HL7 v2-to-FHIR IG (PID[Patient], PV1[Encounter]),
-// trimmed to the fields Simulated Hospital fills. The bundle goes to the
+// The clinical content is a Patient (PID) and an Encounter (PV1), each written
+// with a conditional update keyed on its business identifier, so replaying a
+// message updates instead of duplicating.
+//
+// Around it sits the record of the message itself: a MessageHeader (MSH) and
+// three Provenance resources, one for where the message came from (MSH), one
+// for this transformation, and one for the event (EVN). The original v2
+// message is kept as a DocumentReference that the Provenance points back to.
+// Those are created fresh for every message received, replays included.
+//
+// Mappings follow the HL7 v2-to-FHIR IG&apos;s ADT_A01 message map and its segment
+// maps, trimmed to the fields Simulated Hospital fills. The bundle goes to the
 // channel map as &quot;fhirBundle&quot;; the HTTP Sender posts it to the FHIR server.
 
 // ---- Configuration -----------------------------------------------------------
@@ -218,6 +225,13 @@ var ID_SYSTEMS = {
 };
 // Simulated Hospital leaves PV1-19&apos;s assigning authority empty.
 var VISIT_SYSTEM = &apos;http://simhospital.example.org/fhir/sid/visit-number&apos;;
+// Namespace for v2 application and facility names (HD.1), used to identify
+// the sending and receiving Organizations.
+var HD_SYSTEM = &apos;http://simhospital.example.org/fhir/sid/v2-namespace&apos;;
+// MSH-10 control IDs are unique per sender, so the system names the sender.
+var CONTROL_ID_SYSTEM = &apos;http://simhospital.example.org/fhir/sid/v2-message-control-id&apos;;
+// This channel, as the Device that performs the transformation.
+var TRANSFORMER_SYSTEM = &apos;urn:v2fhirlab:oie-channel&apos;;
 
 // v2 timestamps without an offset are local to the sending system. FHIR needs
 // an offset on every dateTime that has a time, so we supply the sender&apos;s zone.
@@ -310,6 +324,71 @@ function conditionalUrl(resourceType, identifier) {
 	return resourceType + &apos;?identifier=&apos; + encodeURIComponent(identifier.system + &apos;|&apos; + identifier.value);
 }
 
+function base64(text) {
+	return String(java.util.Base64.getEncoder().encodeToString(new java.lang.String(text).getBytes(&apos;UTF-8&apos;)));
+}
+
+// Bundle entries, in the order they&apos;re added. Each gets a urn:uuid fullUrl that
+// other entries reference; the FHIR server swaps in real ids when it stores them.
+var entries = [];
+function addEntry(resource, request) {
+	var fullUrl = &apos;urn:uuid:&apos; + UUIDGenerator.getUUID();
+	entries.push({ fullUrl: fullUrl, resource: resource, request: request });
+	return fullUrl;
+}
+// Reference data (Organizations, the transformer Device): create it the first
+// time it&apos;s seen, and leave it alone after that.
+function addOnce(resource) {
+	var id = resource.identifier[0];
+	return addEntry(resource, {
+		method: &apos;POST&apos;,
+		url: resource.resourceType,
+		ifNoneExist: &apos;identifier=&apos; + encodeURIComponent(id.system + &apos;|&apos; + id.value)
+	});
+}
+
+// HD (hierarchic designator) -&gt; Organization, per the IG&apos;s HD[Organization] map:
+// HD.1 namespace ID, plus HD.2/HD.3 universal ID when the sender gives one.
+function hdOrganization(hd) {
+	var universalId = comp(hd, 2), idType = comp(hd, 3);
+	return {
+		resourceType: &apos;Organization&apos;,
+		identifier: [
+			{ system: HD_SYSTEM, value: comp(hd, 1) },
+			universalId &amp;&amp; {
+				type: idType &amp;&amp; { coding: [{ system: &apos;http://terminology.hl7.org/CodeSystem/v2-0301&apos;, code: idType }] },
+				system: idType === &apos;ISO&apos; || idType === &apos;UUID&apos; ? &apos;urn:ietf:rfc:3986&apos; : undefined,
+				value: idType === &apos;ISO&apos; ? &apos;urn:oid:&apos; + universalId : idType === &apos;UUID&apos; ? &apos;urn:uuid:&apos; + universalId : universalId
+			}
+		]
+	};
+}
+
+// HD -&gt; MessageHeader source/destination endpoint, per the IG&apos;s
+// HD[MessageHeader.*-endpoint] maps. endpoint is required, so with no
+// universal ID it carries a data-absent-reason instead of a value.
+var ENDPOINT_PREFIX = { ISO: &apos;urn:oid:&apos;, UUID: &apos;urn:uuid:&apos;, DNS: &apos;urn:dns:&apos;, URI: &apos;urn:uri:&apos; };
+function setEndpoint(target, hd) {
+	var prefix = ENDPOINT_PREFIX[comp(hd, 3)];
+	if (prefix &amp;&amp; comp(hd, 2)) {
+		target.endpoint = prefix + comp(hd, 2);
+	} else {
+		target._endpoint = { extension: [{ url: &apos;http://hl7.org/fhir/StructureDefinition/data-absent-reason&apos;, valueCode: &apos;unknown&apos; }] };
+	}
+	return target;
+}
+
+// XCN (person) -&gt; Reference by identifier: 1 id, 2 family, 3 given, 6 prefix,
+// 9 assigning authority. Practitioner resources come later.
+function xcnReference(xcn) {
+	return {
+		identifier: { system: systemFor(comp(xcn, 9)), value: comp(xcn, 1) },
+		display: [comp(xcn, 6), comp(xcn, 3), comp(xcn, 2)].filter(Boolean).join(&apos; &apos;)
+	};
+}
+
+var PARTICIPANT_TYPE = &apos;http://terminology.hl7.org/CodeSystem/provenance-participant-type&apos;;
+
 // ---- PID -&gt; Patient -------------------------------------------------------------
 
 var pid = msg[&apos;PID&apos;];
@@ -396,21 +475,18 @@ var encounterClass = ENCOUNTER_CLASS[patientClass];
 var pl = pv1[&apos;PV1.3&apos;];
 var locationName = [comp(pl, 1), comp(pl, 2), comp(pl, 3)].filter(Boolean).join(&apos;, &apos;);
 
-// PV1-7 attending doctor (XCN): 1 id, 2 family, 3 given, 6 prefix, 9 assigning authority.
-// Referenced by identifier; Practitioner resources come later.
+// PV1-7 attending doctor (XCN).
 var attending = reps(pv1[&apos;PV1.7&apos;]).map(function(xcn) {
 	return {
 		type: [{ coding: [{ system: &apos;http://terminology.hl7.org/CodeSystem/v3-ParticipationType&apos;, code: &apos;ATND&apos;, display: &apos;attender&apos; }] }],
-		individual: {
-			identifier: { system: systemFor(comp(xcn, 9)), value: comp(xcn, 1) },
-			display: [comp(xcn, 6), comp(xcn, 3), comp(xcn, 2)].filter(Boolean).join(&apos; &apos;)
-		}
+		individual: xcnReference(xcn)
 	};
 });
 
 var hospitalService = comp(pv1[&apos;PV1.10&apos;], 1);
 
-var patientRef = &apos;urn:uuid:&apos; + UUIDGenerator.getUUID();
+var patientRef = addEntry(patient, { method: &apos;PUT&apos;, url: conditionalUrl(&apos;Patient&apos;, mrn) });
+
 var encounter = {
 	resourceType: &apos;Encounter&apos;,
 	identifier: [visitIdentifier],
@@ -425,15 +501,120 @@ var encounter = {
 	location: locationName &amp;&amp; [{ location: { display: locationName }, status: &apos;active&apos; }]
 };
 
-// ---- Bundle ---------------------------------------------------------------------
+var encounterRef = addEntry(encounter, { method: &apos;PUT&apos;, url: conditionalUrl(&apos;Encounter&apos;, visitIdentifier) });
+
+// ---- MSH -&gt; MessageHeader -------------------------------------------------------
+
+var msh = msg[&apos;MSH&apos;];
+var sendingApp = msh[&apos;MSH.3&apos;], sendingFacility = msh[&apos;MSH.4&apos;];
+var receivingApp = msh[&apos;MSH.5&apos;], receivingFacility = msh[&apos;MSH.6&apos;];
+var messageType = [comp(msh[&apos;MSH.9&apos;], 1), comp(msh[&apos;MSH.9&apos;], 2), comp(msh[&apos;MSH.9&apos;], 3)];
+var messageTypeText = messageType.filter(Boolean).join(&apos;^&apos;); // ADT^A01 (v2.3 has no MSG.3)
+var messageTime = fhirDateTime(comp(msh[&apos;MSH.7&apos;], 1));
+var controlId = comp(msh[&apos;MSH.10&apos;], 1);
+
+// MSH-4 / MSH-6 facilities -&gt; Organizations.
+var senderRef = comp(sendingFacility, 1) &amp;&amp; addOnce(hdOrganization(sendingFacility));
+var receiverRef = comp(receivingFacility, 1) &amp;&amp; addOnce(hdOrganization(receivingFacility));
+
+var messageHeaderRef = addEntry({
+	resourceType: &apos;MessageHeader&apos;,
+	// MSH-11 processing ID (P production, T training, D debugging) and mode.
+	meta: { tag: [
+		comp(msh[&apos;MSH.11&apos;], 1) &amp;&amp; { system: &apos;http://terminology.hl7.org/CodeSystem/v2-0103&apos;, code: comp(msh[&apos;MSH.11&apos;], 1) },
+		comp(msh[&apos;MSH.11&apos;], 2) &amp;&amp; { system: &apos;http://terminology.hl7.org/CodeSystem/v2-0207&apos;, code: comp(msh[&apos;MSH.11&apos;], 2) }
+	] },
+	// MSH-9 message type: the trigger event, from v2 table 0003.
+	eventCoding: { system: &apos;http://terminology.hl7.org/CodeSystem/v2-0003&apos;, code: messageType[1], display: messageTypeText },
+	// MSH-5 receiving application, MSH-6 receiving facility.
+	destination: [setEndpoint({ name: comp(receivingApp, 1), receiver: receiverRef &amp;&amp; { reference: receiverRef } }, receivingApp)],
+	// MSH-4 sending facility.
+	sender: senderRef &amp;&amp; { reference: senderRef },
+	// MSH-3 sending application.
+	source: setEndpoint({ name: comp(sendingApp, 1), software: comp(sendingApp, 2) }, sendingApp),
+	// What the message was about. Not in the IG&apos;s MSH map; added so the header
+	// leads to the resources without going through Provenance.
+	focus: [{ reference: patientRef }, { reference: encounterRef }]
+}, { method: &apos;POST&apos;, url: &apos;MessageHeader&apos; });
+
+// ---- The original message ---------------------------------------------------------
+
+// Kept verbatim (base64, segments separated by CR) so every resource can be
+// traced back to exactly what the sender sent.
+var originalRef = addEntry({
+	resourceType: &apos;DocumentReference&apos;,
+	status: &apos;current&apos;,
+	description: messageTypeText + &apos; message &apos; + controlId + &apos; from &apos; + comp(sendingApp, 1),
+	content: [{ attachment: { contentType: &apos;x-application/hl7-v2+er7&apos;, data: base64(connectorMessage.getRawData()) } }]
+}, { method: &apos;POST&apos;, url: &apos;DocumentReference&apos; });
+
+var fromOriginal = [{ role: &apos;source&apos;, what: { reference: originalRef } }];
+var converted = [{ reference: patientRef }, { reference: encounterRef }];
+
+// ---- Provenance: where the message came from (MSH[Provenance-Source]) ------------
+
+addEntry({
+	resourceType: &apos;Provenance&apos;,
+	target: converted,
+	occurredDateTime: messageTime,
+	recorded: messageTime,
+	activity: { coding: [{ display: &apos;message - &apos; + messageTypeText }] },
+	// MSH-4 sending facility authored the message (MSH-22 would win if sent).
+	agent: [{
+		type: { coding: [{ system: PARTICIPANT_TYPE, code: &apos;author&apos; }] },
+		who: senderRef ? { reference: senderRef } : { display: comp(sendingApp, 1) }
+	}],
+	entity: fromOriginal
+}, { method: &apos;POST&apos;, url: &apos;Provenance&apos; });
+
+// ---- Provenance: this transformation (MSH[Provenance-Transformation]) -------------
+
+var transformerRef = addOnce({
+	resourceType: &apos;Device&apos;,
+	identifier: [{ system: TRANSFORMER_SYSTEM, value: channelId }],
+	deviceName: [{ name: &apos;Open Integration Engine channel &quot;&apos; + channelName + &apos;&quot;&apos;, type: &apos;user-friendly-name&apos; }]
+});
+
+addEntry({
+	resourceType: &apos;Provenance&apos;,
+	target: converted.concat([{ reference: messageHeaderRef }]),
+	recorded: new Date().toISOString(),
+	activity: { coding: [{
+		system: &apos;http://hl7.org/fhir/uv/v2mappings/CodeSystem/provenance-activity-type-v2-to-fhir&apos;,
+		code: &apos;v2-fhir-transformation&apos;,
+		display: &apos;V2 To FHIR Transformation&apos;
+	}] },
+	agent: [{ type: { coding: [{ system: PARTICIPANT_TYPE, code: &apos;assembler&apos; }] }, who: { reference: transformerRef } }],
+	entity: fromOriginal
+}, { method: &apos;POST&apos;, url: &apos;Provenance&apos; });
+
+// ---- Provenance: the event (EVN[Provenance]) ------------------------------------
+
+var evn = msg[&apos;EVN&apos;];
+addEntry({
+	resourceType: &apos;Provenance&apos;,
+	target: [{ reference: messageHeaderRef }],
+	// EVN-2 recorded date/time, EVN-6 event occurred.
+	recorded: fhirDateTime(comp(evn[&apos;EVN.2&apos;], 1)) || messageTime,
+	occurredDateTime: fhirDateTime(comp(evn[&apos;EVN.6&apos;], 1)),
+	activity: { coding: [{ display: &apos;event - &apos; + messageTypeText }] },
+	// EVN-5 operator; without one, the IG falls back to the sending facility.
+	agent: [{
+		who: comp(evn[&apos;EVN.5&apos;], 1) ? xcnReference(evn[&apos;EVN.5&apos;])
+			: senderRef ? { reference: senderRef } : { display: comp(sendingApp, 1) }
+	}]
+}, { method: &apos;POST&apos;, url: &apos;Provenance&apos; });
+
+// ---- Bundle (MSH[Bundle]) ---------------------------------------------------------
 
 var bundle = compact({
 	resourceType: &apos;Bundle&apos;,
+	// The IG maps a v2 message to a &quot;message&quot; Bundle in principle; here the engine
+	// has already handled the event, so the result is stored as a transaction.
 	type: &apos;transaction&apos;,
-	entry: [
-		{ fullUrl: patientRef, resource: patient, request: { method: &apos;PUT&apos;, url: conditionalUrl(&apos;Patient&apos;, mrn) } },
-		{ fullUrl: &apos;urn:uuid:&apos; + UUIDGenerator.getUUID(), resource: encounter, request: { method: &apos;PUT&apos;, url: conditionalUrl(&apos;Encounter&apos;, visitIdentifier) } }
-	]
+	identifier: { system: CONTROL_ID_SYSTEM, value: controlId },
+	timestamp: messageTime,
+	entry: entries
 });
 
 channelMap.put(&apos;fhirBundle&apos;, JSON.stringify(bundle, null, 2));

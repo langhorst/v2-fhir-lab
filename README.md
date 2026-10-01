@@ -67,15 +67,41 @@ The **ADT to FHIR** channel (`engine/oie/channels/adt-to-fhir.xml`) listens on 6
 | PV1-10 | `Encounter.serviceType` | v2 table 0069 (MED, SUR, CAR, ...) |
 | PV1-44 | `Encounter.period.start` | |
 
+The message itself is recorded too, following the IG's MSH and EVN maps, so any resource can be traced back to the v2 message that produced it:
+
+| v2 | FHIR | Notes |
+|---|---|---|
+| MSH-9 | `MessageHeader.eventCoding` | v2 table 0003 (`A01`) |
+| MSH-3 | `MessageHeader.source` | `endpoint` is required; with no network address it carries a data-absent-reason |
+| MSH-4 | `MessageHeader.sender` (Organization) | Organizations are created the first time they're seen |
+| MSH-5, MSH-6 | `MessageHeader.destination` (name, receiver Organization) | |
+| MSH-11 | `MessageHeader.meta.tag` | v2 table 0103 (`T` for Simulated Hospital) |
+| MSH-7, MSH-10 | `Bundle.timestamp`, `Bundle.identifier` | the transaction Bundle isn't stored, so these don't survive into HAPI |
+| the whole message | `DocumentReference` | the original message, base64, byte for byte |
+| MSH | `Provenance` (source) | Patient and Encounter came from this message, authored by MSH-4 |
+| MSH | `Provenance` (transformation) | produced by this channel (a Device), IG activity code `v2-fhir-transformation` |
+| EVN | `Provenance` (event) | targets the MessageHeader; EVN-2 recorded, EVN-5 operator |
+
+`MessageHeader.focus` points at the Patient and Encounter. That isn't in the IG's map, but it lets you go from a message to what it changed without going through Provenance.
+
+To see everything that came from one message, start from the Patient:
+
+```sh
+curl 'http://localhost:8080/fhir/Provenance?target=Patient/<id>&_include=Provenance:entity&_include=Provenance:agent'
+curl 'http://localhost:8080/fhir/MessageHeader?focus=Patient/<id>&_include=MessageHeader:sender'
+```
+
 How it behaves:
 
-- **Replays don't duplicate.** Both resources are written with conditional updates (`PUT Patient?identifier=<MRN>`, `PUT Encounter?identifier=<visit number>`), so re-sending a message updates what's there. The Encounter points at the Patient through the bundle, so HAPI links them in one transaction.
+- **Replays don't duplicate clinical data.** The Patient and Encounter are written with conditional updates (`PUT Patient?identifier=<MRN>`, `PUT Encounter?identifier=<visit number>`), so re-sending a message updates what's there. The Encounter points at the Patient through the bundle, so HAPI links them in one transaction. The message record (MessageHeader, Provenance, DocumentReference) is new for every message received, replays included, because each one is a separate receipt.
 - **Time zones.** v2 timestamps carry no offset, but FHIR needs one on any dateTime with a time. The engine gets `SOURCE_TIMEZONE` from `HOSPITAL_TIMEZONE` in `.env`, and the channel reads timestamps in that zone.
 - **ACKs mean something.** The channel ACKs only after HAPI answers: AA when the bundle was stored, AE when anything failed (a mapping error or a FHIR error). The gateway counts AE as `rejected`, and the message and the error are in the channel's message browser. Other ADT events are ACKed AA with "not converted to FHIR yet".
 - **Simulated Hospital quirks.** It writes some table values as words (`MRN` for `MR`, `HOME` for `H`/`PRN`, `CURRENT` as a name type). The channel maps the first two and leaves name type out; the code maps are at the top of the transformer script.
 - **Identifier systems** are configured at the top of the transformer script. `simhospital.example.org` stands in for the hospital's own namespace; NHS numbers use the real NHS system.
 
-Not converted yet: other ADT events (A02 transfer and A03 discharge are next), Location and Practitioner resources, PD1, AL1 allergies, PID-22 ethnic group, and a Provenance record linking each resource back to its v2 message.
+Not converted yet: other ADT events (A02 transfer and A03 discharge are next), Location and Practitioner resources (PV1-7 and EVN-5 are referenced by identifier), a Device for the receiving application (MSH-5), PD1, AL1 allergies, and PID-22 ethnic group.
+
+HAPI's validator reports two kinds of warnings on the Provenance resources, both expected. The IG gives the source and event activities as display text only, with no code. And HAPI doesn't have the IG loaded, so it can't check the `v2-fhir-transformation` code.
 
 ### Working on the channel
 
